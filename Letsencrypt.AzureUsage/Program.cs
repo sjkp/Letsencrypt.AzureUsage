@@ -48,7 +48,7 @@ namespace Letsencrypt.AzureUsage
     {
         static void Main()
         {
-            var networks = Functions.LoadAzureIps("PublicIPs_20160418.xml").ToList();
+            var networks = Functions.LoadAzureIps(System.IO.File.ReadAllText("PublicIPs_20160418.xml")).ToList();
             var files = System.IO.Directory.EnumerateFiles(System.IO.Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "*.html");
             Parallel.ForEach(files, (htmlFile) =>
             {
@@ -59,7 +59,7 @@ namespace Letsencrypt.AzureUsage
                     var ip = Functions.GetIpFromHost(ssl.Hostname);
                     if (ip != null)
                     {
-                        var foundNetwork = networks.FirstOrDefault(n => IPNetwork.Contains(n, ip));
+                        var foundNetwork = networks.FirstOrDefault(n => IPNetwork.Contains(n.IPNetwork, ip));
                         if (foundNetwork != null)
                         {
                             Console.WriteLine(ssl.Hostname + " found in " + foundNetwork.ToString());

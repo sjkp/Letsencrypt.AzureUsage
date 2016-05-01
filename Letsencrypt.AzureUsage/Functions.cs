@@ -38,6 +38,44 @@ namespace Letsencrypt.AzureUsage
 
         }
 
+        static Lazy<List<AzureRegionIp>> IpNetworks = new Lazy<List<AzureRegionIp>>(() =>
+        {
+            HttpClient client = new HttpClient();
+
+            string xml = client.GetStringAsync("https://download.microsoft.com/download/0/1/8/018E208D-54F8-44CD-AA26-CD7BC9524A8C/PublicIPs_20160426.xml").Result;
+
+            return LoadAzureIps(xml).ToList();
+        });
+
+        public static AzureInformation GetAzureInformation(string ipOrHostname)
+        {
+            IPAddress ip;
+            if (IPAddress.TryParse(ipOrHostname, out ip))
+            {
+                return GetAzureInformationFromIp(ip);
+            }
+            else
+            {
+                ip = GetIpFromHost(ipOrHostname);
+                if (ip != null)
+                {
+                    return GetAzureInformationFromIp(ip);
+                }
+            }
+            return null;
+        }
+
+        private static AzureInformation GetAzureInformationFromIp(IPAddress ip)
+        {
+            var found = IpNetworks.Value.FirstOrDefault(s => IPNetwork.Contains(s.IPNetwork, ip));
+            if (found != null)
+                return new AzureInformation()
+                {
+                    Region = found.Region
+                };
+            return null;
+        }
+
         public static IEnumerable<SslCertInformation> ParseHtmlPage(string filename)
         {
             HtmlAgilityPack.HtmlDocument doc = new HtmlAgilityPack.HtmlDocument();
@@ -64,19 +102,31 @@ namespace Letsencrypt.AzureUsage
 
         }
 
-        public static IEnumerable<IPNetwork> LoadAzureIps(string filename)
+        public class AzureRegionIp
+        {
+            public string Region { get; set; }
+            public IPNetwork IPNetwork { get; set; }
+        }
+        public static IEnumerable<AzureRegionIp> LoadAzureIps(string xml)
         {
             XmlDocument xdoc = new XmlDocument();
-            xdoc.Load(filename);
+            xdoc.LoadXml(xml);
 
-            var nodes = xdoc.SelectNodes("//*/IpRange");
-            foreach (XmlNode node in nodes)
+            var regions = xdoc.SelectNodes("//*/Region");
+            foreach (XmlNode region in regions)
             {
-                var subnet = node.Attributes["Subnet"].Value;
-                var i = IPNetwork.Parse(subnet);
-                //Console.WriteLine(i.FirstUsable.ToString() + " " + i.LastUsable.ToString());
-                //var a = IPNetwork.ListIPAddress(i);
-                yield return i;
+                foreach (XmlNode node in region.ChildNodes)
+                {
+                    var subnet = node.Attributes["Subnet"].Value;
+                    var i = IPNetwork.Parse(subnet);
+                    //Console.WriteLine(i.FirstUsable.ToString() + " " + i.LastUsable.ToString());
+                    //var a = IPNetwork.ListIPAddress(i);
+                    yield return new AzureRegionIp
+                    {
+                        IPNetwork = i,
+                        Region = region.Attributes["Name"].Value
+                    };
+                }
             }
         }
 
@@ -205,6 +255,11 @@ namespace Letsencrypt.AzureUsage
         {
             log.Write("This blob couldn't be processed by the original function: " + message.BlobName);
         }
+    }
+
+    public class AzureInformation
+    {
+        public string Region { get; internal set; }
     }
 
     public class Person
