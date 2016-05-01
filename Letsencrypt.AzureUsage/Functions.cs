@@ -21,14 +21,104 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs;
+using System.Net;
+using System.Xml;
+using System.Net.Http;
+using System.Net.Sockets;
 
 namespace Letsencrypt.AzureUsage
 {
     public class Functions
     {
+        public class SslCertInformation
+        {
+            public string Hostname { get; set; }
+            public DateTime IssuedDate { get; set; }
+            public DateTime ExpireDate { get; set; }
+
+        }
+
+        public static IEnumerable<SslCertInformation> ParseHtmlPage(string filename)
+        {
+            HtmlAgilityPack.HtmlDocument doc = new HtmlAgilityPack.HtmlDocument();
+            doc.Load(filename);
+
+            var atags = doc.DocumentNode.Descendants().Where(s => s.GetAttributeValue("href", "").StartsWith("?id="));
+            foreach(var a in atags)
+            {
+                var dates = atags.First().ParentNode.ParentNode.Descendants().Where(s => s.GetAttributeValue("style", "") == "white-space:nowrap");
+                foreach(var date in dates)
+                {
+                    //Console.WriteLine(date.InnerText + " ");
+                }
+                //Console.WriteLine(a.InnerText);
+                yield return new SslCertInformation()
+                {
+                    Hostname = a.InnerText.Substring(3),
+                    IssuedDate = DateTime.Parse(dates.ElementAt(0).InnerText),
+                    ExpireDate = DateTime.Parse(dates.ElementAt(1).InnerText),
+                };
+            }
+            
+
+
+        }
+
+        public static IEnumerable<IPNetwork> LoadAzureIps(string filename)
+        {
+            XmlDocument xdoc = new XmlDocument();
+            xdoc.Load(filename);
+
+            var nodes = xdoc.SelectNodes("//*/IpRange");
+            foreach (XmlNode node in nodes)
+            {
+                var subnet = node.Attributes["Subnet"].Value;
+                var i = IPNetwork.Parse(subnet);
+                //Console.WriteLine(i.FirstUsable.ToString() + " " + i.LastUsable.ToString());
+                //var a = IPNetwork.ListIPAddress(i);
+                yield return i;
+            }
+        }
+
+        public static void DownloadCerts()
+        {
+            var url = "https://crt.sh/?identity=%25&iCAID=7395&p=";
+
+            HttpClient client = new HttpClient();
+            Parallel.For(0, 100, (i) =>
+            {
+                Console.WriteLine(i);
+                File.WriteAllText(i + ".html", client.GetStringAsync(url + i).Result);
+            });
+        }
+
+        public static IPAddress GetIpFromHost(string hostname)
+        {
+            IPHostEntry host;
+            try
+            {
+                host = Dns.GetHostEntry(hostname);
+
+            } catch(SocketException soe)
+            {
+                Console.WriteLine("Not founud" + hostname);
+                return null;
+            }
+
+            //Console.WriteLine("GetHostEntry({0}) returns:", hostname);
+
+            foreach (IPAddress ip in host.AddressList)
+            {
+                //Console.WriteLine("    {0}", ip);
+            }
+            return host.AddressList.FirstOrDefault();
+        }
+
         /// <summary>
         /// Reads a blob from the container named "input" and writes it to the container named "output". The blob name ("name") is preserved
         /// </summary>
+        /// 
+        
         public static void BlobToBlob([BlobTrigger("input/{name}")] TextReader input, [Blob("output/{name}")] out string output)
         {
             output = input.ReadToEnd();

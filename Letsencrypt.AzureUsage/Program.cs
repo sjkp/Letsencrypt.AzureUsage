@@ -23,6 +23,8 @@ using System;
 using System.Collections.Generic;
 using System.Configuration;
 using System.Linq;
+using System.Net;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -46,6 +48,27 @@ namespace Letsencrypt.AzureUsage
     {
         static void Main()
         {
+            var networks = Functions.LoadAzureIps("PublicIPs_20160418.xml").ToList();
+            var files = System.IO.Directory.EnumerateFiles(System.IO.Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "*.html");
+            Parallel.ForEach(files, (htmlFile) =>
+            {
+                var ssls = Functions.ParseHtmlPage(htmlFile);
+                //Functions.DownloadCerts();
+                Parallel.ForEach(ssls, (ssl) =>
+                {
+                    var ip = Functions.GetIpFromHost(ssl.Hostname);
+                    if (ip != null)
+                    {
+                        var foundNetwork = networks.FirstOrDefault(n => IPNetwork.Contains(n, ip));
+                        if (foundNetwork != null)
+                        {
+                            Console.WriteLine(ssl.Hostname + " found in " + foundNetwork.ToString());
+                        }
+                    }
+                });
+            });
+
+
             if (!VerifyConfiguration())
             {
                 Console.ReadLine();
