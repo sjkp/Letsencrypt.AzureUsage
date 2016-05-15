@@ -14,6 +14,7 @@
 // places, or events is intended or should be inferred.
 //----------------------------------------------------------------------------------
 
+using ComputeWebJobsSDKBlob;
 using Microsoft.Azure.WebJobs;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
@@ -22,11 +23,14 @@ using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Configuration;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using System.Threading.Tasks.Dataflow;
 
 namespace Letsencrypt.AzureUsage
 {
@@ -46,38 +50,105 @@ namespace Letsencrypt.AzureUsage
     //*****************************************************************************************************
     class Program
     {
-        static void Main()
+        static object @lock = new object();
+        public static async Task DoWork(Functions.SslCertInformation ssl, TextWriter writer)
         {
-            var networks = Functions.LoadAzureIps(System.IO.File.ReadAllText("PublicIPs_20160418.xml")).ToList();
-            var files = System.IO.Directory.EnumerateFiles(System.IO.Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "*.html");
-            Parallel.ForEach(files, (htmlFile) =>
+            var sw = new Stopwatch();
+            sw.Start();
+            var ip = await Functions.GetIpFromHost(ssl.Hostname);
+            sw.Stop();
+            var dnsLookup = sw.Elapsed.TotalMilliseconds;
+
+            if (ip != null)
             {
-                var ssls = Functions.ParseHtmlPage(htmlFile);
-                //Functions.DownloadCerts();
-                Parallel.ForEach(ssls, (ssl) =>
+                sw.Reset();
+                sw.Start();
+                var foundNetwork = networks.FirstOrDefault(n => IPNetwork.Contains(n.IPNetwork, ip));
+                if (foundNetwork != null)
                 {
-                    var ip = Functions.GetIpFromHost(ssl.Hostname);
-                    if (ip != null)
-                    {
-                        var foundNetwork = networks.FirstOrDefault(n => IPNetwork.Contains(n.IPNetwork, ip));
-                        if (foundNetwork != null)
-                        {
-                            Console.WriteLine(ssl.Hostname + " found in " + foundNetwork.ToString());
-                        }
-                    }
-                });
-            });
+                    Console.WriteLine(ssl.Hostname + " found in " + foundNetwork.ToString());
 
 
-            if (!VerifyConfiguration())
-            {
-                Console.ReadLine();
-                return;
+                    writer.WriteLine(ssl.Hostname);
+
+
+                }
+                sw.Stop();
             }
 
-            CreateDemoData();
+            Console.WriteLine(" Dns: " + dnsLookup + " ms, rest: " + sw.Elapsed.TotalMilliseconds + " ms");
+        }
+        static List<Functions.AzureRegionIp> networks;
+        static List<Functions.SslCertInformation> ssls;
+        static void Main()
+        {
+            //Functions.DownloadCerts();
+            //var res = Functions.CheckSSLPath(System.IO.File.ReadAllLines("foundInAzure.txt"));
+            //System.IO.File.WriteAllLines("sslpathinfo.txt", res.Select(s => s.Key + "," + s.Value));
 
-            JobHost host = new JobHost();
+            //Console.WriteLine(Functions.GetAzureIpDatacenterUrl());
+            //return;
+
+            HashSet<string> inAzure = new HashSet<string>();
+            networks = Functions.LoadAzureIps(System.IO.File.ReadAllText("PublicIPs_20160418.xml")).ToList();
+#if DEBUG
+            //ssls = System.IO.File.ReadAllLines(@"J:\Projects\certificatetransparency\tools\out3.txt").Where(s => s.Contains("Let's Encrypt Authority X1")).Select(s => new Functions.SslCertInformation() { Hostname = s.Split(new[] { ';' }).First() }).ToList();
+            //var s = Functions.CheckSSLPath(new[] { "schdo.com" });
+            //CreateDemoData();
+            //Functions.ReadFiles();
+            Functions.ReadFilesFromAzure();
+
+            return;
+#endif
+
+
+            //var files = System.IO.Directory.EnumerateFiles(System.IO.Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "*.html");
+            //Parallel.ForEach(files, (htmlFile, fstate, x) =>
+            //{
+            //    var ssls = Functions.ParseHtmlPage(htmlFile);
+            //    Console.WriteLine(htmlFile);
+            //    Parallel.ForEach(ssls, (ssl, state, i) =>
+            //    {
+            //        if (!inAzure.Contains(ssl.Hostname))
+            //        {
+            //            inAzure.Add(ssl.Hostname);
+            //        }
+            //        /*var ip = Functions.GetIpFromHost(ssl.Hostname);
+            //        if (ip != null)
+            //        {
+            //            var foundNetwork = networks.FirstOrDefault(n => IPNetwork.Contains(n.IPNetwork, ip));
+            //            if (foundNetwork != null)
+            //            {
+            //                Console.WriteLine(ssl.Hostname + " found in " + foundNetwork.ToString());
+            //                if (!inAzure.Contains(ssl.Hostname))
+            //                {
+            //                    inAzure.Add(ssl.Hostname);
+            //                }
+            //            }
+            //        }*/
+            //    });
+            //    Console.WriteLine(inAzure.Count);
+            //});
+
+            //System.IO.File.WriteAllLines("foundInAzure-2.txt", inAzure.ToArray());
+
+
+            //if (!VerifyConfiguration())
+            //{
+            //    Console.ReadLine();
+            //    return;
+            //}
+
+            //CreateDemoData();
+
+            var cfg = new JobHostConfiguration()
+            {
+
+            };
+
+            cfg.Queues.BatchSize = 4;
+
+            JobHost host = new JobHost(cfg);
             host.RunAndBlock();
         }
 
@@ -102,23 +173,33 @@ namespace Letsencrypt.AzureUsage
 
             CloudStorageAccount storageAccount = CloudStorageAccount.Parse(ConfigurationManager.ConnectionStrings["AzureWebJobsStorage"].ConnectionString);
             CloudBlobClient blobClient = storageAccount.CreateCloudBlobClient();
-            CloudBlobContainer container = blobClient.GetContainerReference("input");
+            CloudBlobContainer container = blobClient.GetContainerReference("output");
             container.CreateIfNotExists();
 
-            CloudBlockBlob blob = container.GetBlockBlobReference("BlobOperations.txt");
-            blob.UploadText("Hello world!");
+            CloudQueue queue = CreateQueue(storageAccount, "hostnames");
 
-            CloudQueueClient queueClient = storageAccount.CreateCloudQueueClient();
-            CloudQueue queue = queueClient.GetQueueReference("persons");
-            queue.CreateIfNotExists();
+            CreateQueue(storageAccount, "shouldbenotified");
 
-            Person person = new Person()
+            queue.FetchAttributes();
+            var messageCount = queue.ApproximateMessageCount;
+            Console.WriteLine("Message count: " + messageCount.GetValueOrDefault());
+            return;
+            int bSize = 250;
+
+            for (int i = 0; i < ssls.Count / bSize; i++)
             {
-                Name = "John",
-                Age = 42
-            };
+                Console.WriteLine(i + "/" + ssls.Count / bSize);
+                queue.AddMessage(new CloudQueueMessage(JsonConvert.SerializeObject(ssls.Skip(i * bSize).Take(bSize).Select(s => s.Hostname))));
+            }
 
-            queue.AddMessage(new CloudQueueMessage(JsonConvert.SerializeObject(person)));
+        }
+
+        private static CloudQueue CreateQueue(CloudStorageAccount storageAccount, string name)
+        {
+            CloudQueueClient queueClient = storageAccount.CreateCloudQueueClient();
+            CloudQueue queue = queueClient.GetQueueReference(name);
+            queue.CreateIfNotExists();
+            return queue;
         }
     }
 }
